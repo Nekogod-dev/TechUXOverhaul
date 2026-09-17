@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+dist/
+*.user
+*.suo
+
+# IDE
+.vs/
+.idea/
+.vscode/
+
+# Local game paths / assemblies
+lib/
+references/
+
+# BepInEx runtime output
+BepInEx/config/
+BepInEx/LogOutput.log
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "name": "DSPTechTreeUX",
+  "version_number": "0.9.0",
+  "website_url": "https://github.com/Nekogod-dev/DSPTechTreeUX",
+  "description": "A compact, searchable replacement for DSP's Technology and Upgrades screens with clearer research state, matrix requirements, filters and dependency highlighting.",
+  "dependencies": [
+    "xiaoye97-BepInEx-5.4.17"
+  ]
+}
