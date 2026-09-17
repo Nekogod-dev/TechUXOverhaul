@@ -1,26 +1,22 @@
 # Changelog
 
-## 0.9.0
+## 1.0.0
 
-First public pre-1.0 release.
+First stable release.
 
-### Added
-
-- Compact replacement Technology and Upgrades views.
-- Clear locked, researchable, selected and completed node states.
-- Matrix requirement icons directly on nodes.
-- Technology/item/recipe search.
-- Matrix-tier and combat filters.
-- Normal, implicit and inferred dependency highlighting.
-- Dependency-aware research queue validation.
-- Multi-level and repeatable research progress display.
-- Vanilla-style live research progress information in the details panel.
-- Highlighted main research progression from Electromagnetism to Mission Completed.
-- Independent pan/zoom state for Technology and Upgrades pages.
-- Filter-aware layout compaction and recentring.
-- Configurable ordinary and main-line dependency thickness.
-- Mouse controls for deselecting and closing the technology screen.
-
-### Known pre-1.0 work
-
-See the **Road to 1.0** section in the README.
+- Added collapsible technology details panel.
+- Reworked Search / Filters into a compact flyout beside the vanilla top tabs.
+- Replaced filter cycling with explicit Matrix and Combat selectors.
+- Added White Matrix-only compact upgrade layout.
+- Added Infinite-only filtering for upgrades.
+- Added direct `Q+` research queue action to technology nodes.
+- Added improved selected-path, prerequisite and immediate-descendant highlighting.
+- Added partial-research percentages and repeatable-upgrade level presentation.
+- Added per-save persistence for page, filters, zoom and pan through DSPModSave.
+- Preserved vanilla right-click queue removal behaviour.
+- Fixed graph panning so dragging empty space no longer clears the current selection.
+- Improved inferred dependency handling for practical recipe/item unlock requirements.
+- Audited research, prerequisite, matrix and queue handling against DSP 0.10.34 decompiled source and switched several paths to vanilla APIs/constants where available.
+- Tested multiple resolutions and UI scales.
+- Sanity-tested English, Simplified Chinese and Japanese UI layouts.
+- General release cleanup and regression testing.
