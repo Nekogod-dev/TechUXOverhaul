@@ -1,107 +1,78 @@
-# DSP Tech Tree UX Overhaul
+# DSP Tech Tree UX
 
-A compact replacement for Dyson Sphere Program's **Technology** and **Upgrades** screens, focused on making research requirements, dependencies and current state easier to understand at a glance.
-
-> **Current release: 0.9.0**  
-> This is the first public pre-1.0 release. The core feature set is in place and intended for normal play, but there are still interaction, persistence and compatibility items planned before 1.0.
+A compact replacement for Dyson Sphere Program's Technology and Upgrades screens, focused on making research requirements, dependencies and current state easier to understand at a glance.
 
 ## Features
 
-- Compact technology and upgrade nodes with clear state colours:
-  - **Orange** — prerequisites are not yet satisfied
-  - **Green** — ready to research or validly queued
-  - **Blue** — completed
-  - **Yellow** — selected
-- Matrix requirements shown directly on nodes using the actual matrix icons.
-- Search by technology, unlocked recipe and unlocked item name.
-- Matrix-tier filtering, including cumulative filters and White Matrix-only filtering.
-- Combat filtering with a utility mode that preserves Battlefield Analysis Base progression while hiding unrelated combat research.
-- Dependency highlighting that includes normal, implicit and inferred research requirements.
-- Selected paths stop at already-satisfied prerequisites so only research still required is highlighted.
-- Research queue validation uses the displayed dependency map, preventing misleading queue states caused by hidden/inferred requirements.
-- Multi-level and repeatable research displays completed levels rather than DSP's internal "current level" counter.
-- Partial research percentage remains visible on the node if research is interrupted.
-- Selected active research shows a vanilla-style progress bar, current hash rate, estimated completion time and hash progress in the details panel.
-- Main research progression from Electromagnetism to Mission Completed is highlighted separately.
-- Mouse-friendly navigation:
-  - click empty space to deselect
-  - right-click to close the Technology screen
-- Independent Technology/Upgrades pan and zoom state.
-- Filtered layouts compact empty rows while preserving intentional section spacing.
+- Compact technology and upgrade nodes with clear research-state colouring.
+- Searchable Technology and Upgrades pages.
+- Explicit Matrix and Combat filters.
+- White Matrix-only compact upgrade layout, with an optional Infinite-only filter.
+- Direct `Q+` action on technology nodes to add research using DSP's normal research queue rules.
+- Dependency highlighting that distinguishes the selected technology, its prerequisites/path, immediate downstream unlocks and unrelated nodes.
+- Main research progression from Electromagnetism through Mission Completed is highlighted separately.
+- Partial research progress and repeatable-upgrade level information shown directly on nodes.
+- Collapsible details panel.
+- Compact Search / Filters flyout beside the vanilla top tabs.
+- Right-click on queued research continues to use the vanilla queue interaction.
+- Mouse-friendly graph navigation:
+  - drag empty space to pan without clearing the current selection;
+  - click empty space to deselect;
+  - right-click empty space to close the Technology screen.
+- Independent Technology / Upgrades pan and zoom state.
+- Per-save persistence for page, filters, zoom and pan through DSPModSave.
+- Filtered layouts compact empty space while preserving the overall vanilla-derived tree structure.
+- Additional inferred item/recipe unlock dependencies where DSP's visible prerequisite graph does not fully express a practical dependency.
 
 ## Configuration
 
-The current release exposes two appearance settings:
+The mod exposes appearance settings through the normal BepInEx configuration file:
 
 - `LineThickness` — thickness of ordinary dependency lines. Default: `5.0`
 - `MainLineThickness` — thickness of the main research progression line. Default: `9.0`
-
-The configuration file is created by BepInEx after the mod has been run once.
 
 ## Installation
 
 ### Mod manager
 
-Install **DSP Tech Tree UX** through Thunderstore Mod Manager or r2modman.
+Install DSP Tech Tree UX through Thunderstore Mod Manager or r2modman.
 
 ### Manual
 
 1. Install BepInEx for Dyson Sphere Program.
-2. Copy `DSPTechTreeUX.dll` into:
+2. Install DSPModSave.
+3. Copy `DSPTechTreeUX.dll` into:
    `Dyson Sphere Program/BepInEx/plugins/DSPTechTreeUX/`
-3. Start the game.
+4. Start the game.
 
 ## Compatibility
 
-Built for **Dyson Sphere Program 0.10.34.x** using BepInEx 5 / HarmonyX.
+Built and tested for Dyson Sphere Program 0.10.34.x using BepInEx 5 / HarmonyX.
 
-No CommonAPI or LDBTool dependency is required.
+DSPModSave is required for per-save UI state persistence.
 
-## Road to 1.0
+The mod uses DSP's own research queue and technology-state APIs rather than directly editing research progress or queue data.
 
-The core functionality is present. The 0.9.x releases will focus on interaction polish, persistence and compatibility before promoting the mod to 1.0:
+## Localisation
 
-- **Collapsible details panel** — when nothing is selected, collapse the large details panel down to a small `Please select a technology` prompt.
-- **Collapsible search/filter controls** — replace the permanently visible search/filter strip with a compact top-edge control that expands when needed.
-- **Replace filter cycles with explicit controls** — change Matrix and Combat filter cycling buttons to clearer dropdowns, checkboxes or equivalent controls.
-- **Research directly from nodes** — add a quick research action to each node, likely as a small hover/selection research wing, with double-click as a possible supplementary shortcut.
-- **Improve selection dimming** — selecting a prerequisite should not make valid downstream technologies look disabled.
-- **Per-save view-state persistence** — remember the selected page, Matrix/Combat filters, zoom and pan position separately for each save.
-- Fine-tune level and partial-research percentage positioning.
-- Review element scaling across the full zoom range and decide which parts should receive configurable zoom compensation.
-- Tidy the White Matrix-only upgrade layout where surviving nodes can still look sparse or awkward.
-- Test more resolutions/UI scales and a wider range of early-, mid- and late-game saves.
-- Test localisation more thoroughly.
-- Final compatibility/regression pass against DSP 0.10.34.x before promoting the mod to 1.0.
+Vanilla technology names, descriptions and other game-provided strings continue to use DSP's localisation system.
 
-## Possible post-1.0 additions
-
-- **Vanilla Enhanced mode** — retain the original large DSP nodes while adding the search, filters, matrix requirements, state borders and dependency improvements from this mod.
-- Additional appearance and zoom-scaling controls.
-- Optional alternative/grouped layouts beyond the current vanilla-derived positioning.
+The mod's own UI strings are currently English-only. Chinese and Japanese have been sanity-tested for layout and font compatibility.
 
 ## Feedback and bug reports
 
-Feedback, bug reports and suggestions are very welcome.
+Feedback, bug reports and suggestions are welcome.
 
-- **Dyson Sphere Program Steam forums:** Nekogod
-- **Discord:** Nekogod
-- **GitHub:** [Nekogod-dev](https://github.com/Nekogod-dev) — issues and source for this mod live in this repository.
+- Dyson Sphere Program Steam forums: Nekogod
+- Discord: Nekogod
+- GitHub: Nekogod-dev
 
 ## Notes
 
-The mod intentionally keeps the vanilla technology positions as its starting layout rather than attempting to redesign the entire research tree. Filtering may compact empty rows and recentre the visible result.
+The mod intentionally keeps the vanilla technology positions as its starting layout rather than redesigning the research tree from scratch. Filtering may compact empty rows and recentre visible results.
 
 Normal and implicit DSP prerequisites are used directly. The mod also infers some item/recipe unlock dependencies that are required in practice but are not represented by the vanilla visible dependency graph.
 
 ## Building from source
 
-The repository does **not** redistribute Dyson Sphere Program, Unity or BepInEx assemblies.
-
-The included project expects a local DSP installation. Either edit `DSPGameDir` in the project file or pass it as an MSBuild property:
-
-```powershell
-dotnet build -c Release -p:DSPGameDir="C:\Program Files (x86)\Steam\steamapps\common\Dyson Sphere Program"
-```
-
-The supplied `build-release.ps1` builds the DLL and creates a Thunderstore-ready ZIP under `dist/`.
+The project should reference the local DSP, Unity, BepInEx, HarmonyX and DSPModSave assemblies. The repository should not redistribute Dyson Sphere Program or Unity game assemblies.
