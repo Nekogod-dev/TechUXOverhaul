@@ -1,4 +1,4 @@
-# DSP Tech Tree UX
+# DSP Tech Tree UX Overhaul
 
 A compact replacement for Dyson Sphere Program's **Technology** and **Upgrades** screens, focused on making research requirements, dependencies and current state easier to understand at a glance.
 
