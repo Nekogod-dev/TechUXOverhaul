@@ -2,22 +2,88 @@ using BepInEx;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using crecheng.DSPModSave;
 
 namespace DSPTechTreeUX
 {
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    public sealed class Plugin : BaseUnityPlugin
+    [BepInDependency(DSPModSavePlugin.MODGUID)]
+    public sealed class Plugin : BaseUnityPlugin, IModCanSave
     {
         public const string PluginGuid = "lee.dsp.techtree.ux";
-        public const string PluginName = "DSP Tech Tree UX";
-        public const string PluginVersion = "0.9.0";
+        public const string PluginName = "DSP Tech Tree UX Overhaul";
+        public const string PluginVersion = "1.0.0";
 
         internal static BepInEx.Configuration.ConfigEntry<float> LineThickness;
         internal static BepInEx.Configuration.ConfigEntry<float> MainLineThickness;
+
+        private const int SaveDataVersion = 2;
+
+        internal static TechTreeSavedViewState SavedViewState =
+            TechTreeSavedViewState.CreateDefault();
+
+        public void Export(BinaryWriter w)
+        {
+            TechTreeView activeView = TechTreeView.ActiveInstance;
+            if (activeView != null)
+                SavedViewState = activeView.CaptureSavedViewState();
+
+            w.Write(SaveDataVersion);
+            w.Write(SavedViewState.Page);
+            w.Write(SavedViewState.MatrixFilter);
+            w.Write(SavedViewState.CombatFilter);
+            w.Write(SavedViewState.InfiniteOnly);
+
+            for (int i = 0; i < 2; i++)
+            {
+                w.Write(SavedViewState.Zoom[i]);
+                w.Write(SavedViewState.Pan[i].x);
+                w.Write(SavedViewState.Pan[i].y);
+            }
+        }
+
+        public void Import(BinaryReader r)
+        {
+            int version = r.ReadInt32();
+
+            TechTreeSavedViewState state = TechTreeSavedViewState.CreateDefault();
+
+            if (version >= 1)
+            {
+                state.Page = Mathf.Clamp(r.ReadInt32(), 0, 1);
+                state.MatrixFilter = Mathf.Clamp(r.ReadInt32(), -1, 5);
+                state.CombatFilter = Mathf.Clamp(r.ReadInt32(), 0, 2);
+
+                if (version >= 2)
+                    state.InfiniteOnly = r.ReadBoolean();
+
+                for (int i = 0; i < 2; i++)
+                {
+                    state.Zoom[i] = Mathf.Clamp(r.ReadSingle(), 0.45f, 1.333333333f);
+                    state.Pan[i] = new Vector2(r.ReadSingle(), r.ReadSingle());
+                }
+            }
+
+            SavedViewState = state;
+
+            TechTreeView activeView = TechTreeView.ActiveInstance;
+            if (activeView != null)
+                activeView.MarkSavedViewStatePending();
+        }
+
+        public void IntoOtherSave()
+        {
+            SavedViewState = TechTreeSavedViewState.CreateDefault();
+
+            TechTreeView activeView = TechTreeView.ActiveInstance;
+            if (activeView != null)
+                activeView.MarkSavedViewStatePending();
+        }
 
         private void Awake()
         {
@@ -35,6 +101,30 @@ namespace DSPTechTreeUX
 
             new Harmony(PluginGuid).PatchAll();
             Logger.LogInfo($"{PluginName} {PluginVersion} loaded.");
+        }
+    }
+
+    internal sealed class TechTreeSavedViewState
+    {
+        internal int Page;
+        internal int MatrixFilter;
+        internal int CombatFilter;
+        internal bool InfiniteOnly;
+        internal readonly float[] Zoom = new float[2];
+        internal readonly Vector2[] Pan = new Vector2[2];
+
+        internal static TechTreeSavedViewState CreateDefault()
+        {
+            TechTreeSavedViewState state = new TechTreeSavedViewState();
+            state.Page = 0;
+            state.MatrixFilter = -1;
+            state.CombatFilter = 0;
+            state.InfiniteOnly = false;
+            state.Zoom[0] = 0.72f;
+            state.Zoom[1] = 0.72f;
+            state.Pan[0] = Vector2.zero;
+            state.Pan[1] = Vector2.zero;
+            return state;
         }
     }
 
@@ -79,9 +169,11 @@ namespace DSPTechTreeUX
         }
     }
 
-    internal sealed class TechTreeInputCatcher : MonoBehaviour, IScrollHandler, IBeginDragHandler, IDragHandler, IPointerClickHandler
+    internal sealed class TechTreeInputCatcher : MonoBehaviour, IScrollHandler, IPointerDownHandler, IBeginDragHandler, IDragHandler, IPointerClickHandler
     {
         internal TechTreeView Owner;
+
+        private bool _dragged;
 
         public void OnScroll(PointerEventData eventData)
         {
@@ -92,8 +184,17 @@ namespace DSPTechTreeUX
             eventData.Use();
         }
 
+        public void OnPointerDown(PointerEventData eventData)
+        {
+            // Every new pointer gesture starts as a potential click. Unity only
+            // promotes it to BeginDrag after the normal EventSystem drag threshold.
+            _dragged = false;
+        }
+
         public void OnBeginDrag(PointerEventData eventData)
         {
+            _dragged = true;
+
             if (eventData != null)
                 eventData.Use();
         }
@@ -103,6 +204,7 @@ namespace DSPTechTreeUX
             if (Owner == null || eventData == null)
                 return;
 
+            _dragged = true;
             Owner.HandlePanDelta(eventData.delta);
             eventData.Use();
         }
@@ -111,6 +213,14 @@ namespace DSPTechTreeUX
         {
             if (Owner == null || eventData == null)
                 return;
+
+            // Some Unity UI event paths can still deliver PointerClick after a drag.
+            // Panning the graph should never clear the current selected technology.
+            if (_dragged)
+            {
+                eventData.Use();
+                return;
+            }
 
             // This catcher only receives clicks that did not land on a node/panel
             // control, so a left click here is genuinely empty graph space.
@@ -122,12 +232,121 @@ namespace DSPTechTreeUX
         }
     }
 
+    internal sealed class TechTreeResearchWingGraphic : UnityEngine.UI.Graphic
+    {
+        internal Color BorderColor = Color.white;
+        internal Color FillColor = Color.black;
+        internal Color ArrowColor = new Color(0.25f, 0.75f, 1f, 1f);
+
+        internal void SetColors(Color border, Color fill)
+        {
+            if (BorderColor == border && FillColor == fill)
+                return;
+
+            BorderColor = border;
+            FillColor = fill;
+            SetVerticesDirty();
+        }
+
+        protected override void OnPopulateMesh(UnityEngine.UI.VertexHelper vh)
+        {
+            vh.Clear();
+
+            Rect r = rectTransform.rect;
+            float w = r.width;
+            float h = r.height;
+            if (w <= 0f || h <= 0f)
+                return;
+
+            Vector2[] outer =
+            {
+                new Vector2(0f, 0f),
+                new Vector2(w * 0.42f, 0f),
+                new Vector2(w, h * 0.23f),
+                new Vector2(w, h * 0.77f),
+                new Vector2(w * 0.42f, h),
+                new Vector2(0f, h)
+            };
+
+            float b = 4f;
+            Vector2[] inner =
+            {
+                new Vector2(b, b),
+                new Vector2(w * 0.42f - 1f, b),
+                new Vector2(w - b, h * 0.23f + 3f),
+                new Vector2(w - b, h * 0.77f - 3f),
+                new Vector2(w * 0.42f - 1f, h - b),
+                new Vector2(b, h - b)
+            };
+
+            AddConvex(vh, outer, BorderColor);
+            AddConvex(vh, inner, FillColor);
+
+        }
+
+        private static void AddConvex(UnityEngine.UI.VertexHelper vh, Vector2[] points, Color color)
+        {
+            if (points == null || points.Length < 3)
+                return;
+
+            int start = vh.currentVertCount;
+            for (int i = 0; i < points.Length; i++)
+            {
+                UIVertex v = UIVertex.simpleVert;
+                v.position = points[i];
+                v.color = color;
+                vh.AddVert(v);
+            }
+
+            for (int i = 1; i < points.Length - 1; i++)
+                vh.AddTriangle(start, start + i, start + i + 1);
+        }
+
+        private static void AddLine(
+            UnityEngine.UI.VertexHelper vh,
+            Vector2 a,
+            Vector2 b,
+            float thickness,
+            Color color)
+        {
+            Vector2 d = b - a;
+            if (d.sqrMagnitude < 0.0001f)
+                return;
+
+            d.Normalize();
+            Vector2 n = new Vector2(-d.y, d.x) * (thickness * 0.5f);
+
+            int start = vh.currentVertCount;
+            AddVert(vh, a - n, color);
+            AddVert(vh, a + n, color);
+            AddVert(vh, b + n, color);
+            AddVert(vh, b - n, color);
+
+            vh.AddTriangle(start, start + 1, start + 2);
+            vh.AddTriangle(start, start + 2, start + 3);
+        }
+
+        private static void AddVert(UnityEngine.UI.VertexHelper vh, Vector2 position, Color color)
+        {
+            UIVertex v = UIVertex.simpleVert;
+            v.position = position;
+            v.color = color;
+            vh.AddVert(v);
+        }
+    }
+
     internal sealed class TechTreeView : MonoBehaviour
     {
         private const float NodeSize = 104f;
         private const float GraphMargin = 100f;
         private const float DetailWidth = 500f;
         private const float DetailHeight = 540f;
+        private const float DetailCollapsedWidth = 250f;
+        private const float DetailCollapsedHeight = 46f;
+        private const float SearchFilterWidth = 420f;
+        private const float SearchFilterHeight = 142f;
+        private const float SearchFilterTabWidth = 150f;
+        private const float SearchFilterTabHeight = 24f;
         private const float MinZoom = 0.45f;
         private const float MaxZoom = 1.333333333f;
 
@@ -138,10 +357,10 @@ namespace DSPTechTreeUX
         private const float PanSafeTop = 190f;
         private const float PanSafeBottom = 120f;
 
-        private static readonly int[] MatrixIds =
+        private static int[] MatrixIds
         {
-            6001, 6002, 6003, 6004, 6005, 6006
-        };
+            get { return TechProto.matrixIds; }
+        }
 
         // Language-independent vanilla main research spine:
         // Electromagnetism -> Electromagnetic Matrix -> Solar Collection ->
@@ -182,6 +401,7 @@ namespace DSPTechTreeUX
         private TechTreeEdgeGraphic _edgeGraphic;
         private readonly TechTreeEdgeGraphic[] _pageEdgeGraphics = new TechTreeEdgeGraphic[2];
         private RectTransform _detailPanel;
+        private UnityEngine.UI.Text _detailEmptyPrompt;
         private UnityEngine.UI.Image _detailIcon;
         private UnityEngine.UI.Text _detailTitle;
         private UnityEngine.UI.Text _detailLevel;
@@ -199,6 +419,10 @@ namespace DSPTechTreeUX
         private UnityEngine.UI.Button _researchButton;
         private UnityEngine.UI.Text _researchButtonText;
         private UnityEngine.UI.Text _legend;
+        private RectTransform _searchFilterContent;
+        private RectTransform _searchFilterTab;
+        private UnityEngine.UI.Text _searchFilterTabText;
+        private bool _searchFilterExpanded;
         private UnityEngine.UI.InputField _searchInput;
         private UnityEngine.UI.Button _searchClearButton;
         private UnityEngine.UI.Text _searchStatus;
@@ -206,14 +430,19 @@ namespace DSPTechTreeUX
 
         private UnityEngine.UI.Button _matrixFilterButton;
         private UnityEngine.UI.Text _matrixFilterText;
+        private RectTransform _matrixFilterMenu;
         private UnityEngine.UI.Button _combatFilterButton;
         private UnityEngine.UI.Text _combatFilterText;
+        private RectTransform _combatFilterMenu;
+        private UnityEngine.UI.Button _infiniteOnlyButton;
+        private UnityEngine.UI.Text _infiniteOnlyText;
 
         // -1 = All, 0..4 = cumulative up to that matrix tier, 5 = White-required only.
         private int _matrixFilter = -1;
 
         // 0 = All, 1 = Utility combat tech only, 2 = Hide combat tech.
         private int _combatFilter = 0;
+        private bool _infiniteOnly;
 
         private readonly HashSet<int> _utilityCombatTechIds = new HashSet<int>();
         private bool _utilityCombatTechIdsBuilt;
@@ -270,15 +499,69 @@ namespace DSPTechTreeUX
         private float _zoom = 0.72f;
         private Vector2 _baseGraphSize = new Vector2(1100f, 720f);
         private float _nextStateRefreshTime;
+        private bool _savedViewStatePending = true;
+
+        internal static TechTreeView ActiveInstance { get; private set; }
 
         internal bool IsVisible => _visible;
 
         internal void Initialize(UITechTree tree)
         {
+            ActiveInstance = this;
             _tree = tree;
             _font = tree.tabButtonText0 != null ? tree.tabButtonText0.font : Resources.GetBuiltinResource<UnityEngine.Font>("Arial.ttf");
             CreateRoot();
             Hide();
+        }
+
+        internal TechTreeSavedViewState CaptureSavedViewState()
+        {
+            TechTreeSavedViewState state = TechTreeSavedViewState.CreateDefault();
+
+            state.Page = _tree != null
+                ? Mathf.Clamp(_tree.page, 0, 1)
+                : Mathf.Clamp(_builtPage, 0, 1);
+            state.MatrixFilter = _matrixFilter;
+            state.CombatFilter = _combatFilter;
+            state.InfiniteOnly = _infiniteOnly;
+
+            for (int i = 0; i < 2; i++)
+            {
+                state.Zoom[i] = _pageZoom[i];
+                state.Pan[i] = _pagePan[i];
+            }
+
+            return state;
+        }
+
+        internal void MarkSavedViewStatePending()
+        {
+            _savedViewStatePending = true;
+        }
+
+        private void ApplySavedViewState()
+        {
+            if (!_savedViewStatePending)
+                return;
+
+            TechTreeSavedViewState state = Plugin.SavedViewState;
+            if (state == null)
+                state = TechTreeSavedViewState.CreateDefault();
+
+            _matrixFilter = Mathf.Clamp(state.MatrixFilter, -1, 5);
+            _combatFilter = Mathf.Clamp(state.CombatFilter, 0, 2);
+            _infiniteOnly = state.InfiniteOnly;
+
+            for (int i = 0; i < 2; i++)
+            {
+                _pageZoom[i] = Mathf.Clamp(state.Zoom[i], MinZoom, MaxZoom);
+                _pagePan[i] = state.Pan[i];
+            }
+
+            if (_tree != null)
+                _tree.page = Mathf.Clamp(state.Page, 0, 1);
+
+            _savedViewStatePending = false;
         }
 
         internal void Show()
@@ -286,8 +569,11 @@ namespace DSPTechTreeUX
             if (_root == null)
                 CreateRoot();
 
+            ApplySavedViewState();
+
             _visible = true;
             _root.gameObject.SetActive(true);
+            RefreshFilterLabels();
             RefreshPage();
 
             HideVanillaBottomGlow();
@@ -310,10 +596,37 @@ namespace DSPTechTreeUX
         internal void Hide()
         {
             _visible = false;
+            SetSearchFilterExpanded(false);
+
             if (_root != null)
                 _root.gameObject.SetActive(false);
 
             RestoreVanillaGraphs();
+        }
+
+        private bool PointerOverQueuedTech()
+        {
+            if (UIRoot.instance == null ||
+                UIRoot.instance.uiGame == null ||
+                UIRoot.instance.uiGame.techTree == null)
+                return false;
+
+            UITechTree tree = UIRoot.instance.uiGame.techTree;
+            UIResearchQueue queue = tree.resQueueUI;
+            if (queue == null || queue.nodes == null)
+                return false;
+
+            for (int i = 0; i < queue.nodes.Length; i++)
+            {
+                UIResearchQueueNode node = queue.nodes[i];
+                if (node == null || node.trans == null || !node.gameObject.activeInHierarchy)
+                    continue;
+
+                if (PointerInside(node.trans))
+                    return true;
+            }
+
+            return false;
         }
 
         private void LateUpdate()
@@ -321,10 +634,15 @@ namespace DSPTechTreeUX
             if (!_visible || _tree == null)
                 return;
 
-            // Mouse-only close path. Use DSP's own public close method rather than
-            // simulating Escape or directly toggling UI objects.
+            // Mouse-only close path. Check the embedded research queue before
+            // closing because Unity's UIButton right-click callback is processed
+            // after this component's LateUpdate. If the pointer is over an active
+            // queued-tech node, leave the click alone so vanilla can cancel it.
             if (Input.GetMouseButtonDown(1))
             {
+                if (PointerOverQueuedTech())
+                    return;
+
                 if (UIRoot.instance != null && UIRoot.instance.uiGame != null)
                     UIRoot.instance.uiGame.ShutTechTree();
                 return;
@@ -340,7 +658,9 @@ namespace DSPTechTreeUX
             if (_builtPage != _tree.page)
                 RefreshPage();
 
+            UpdateNodeResearchWingHoverStates();
             UpdateDetailPanelPosition();
+            UpdateSearchFilterFlyout();
 
             if (_selectedTechId != 0)
                 RefreshDetailProgress();
@@ -364,6 +684,7 @@ namespace DSPTechTreeUX
 
             int newPage = Mathf.Clamp(_tree.page, 0, 1);
             _builtPage = newPage;
+            RefreshFilterLabels();
             _selectedTechId = 0;
             _selectedPath.Clear();
             _selectedEdges.Clear();
@@ -473,19 +794,154 @@ namespace DSPTechTreeUX
             _edges = _pageEdges[0];
 
             CreateDetailPanel();
+            CreateSearchFilterFlyout();
             CreateSearchBox();
             CreateFilterBar();
             CreateLegend();
         }
 
+        private void CreateSearchFilterFlyout()
+        {
+            GameObject contentObj = CreateUIObject("SearchFilterContent", _root);
+            _searchFilterContent = contentObj.GetComponent<RectTransform>();
+            _searchFilterContent.anchorMin = _searchFilterContent.anchorMax = new Vector2(0.5f, 1f);
+            _searchFilterContent.pivot = new Vector2(0.5f, 1f);
+            _searchFilterContent.sizeDelta = new Vector2(SearchFilterWidth, SearchFilterHeight);
+            _searchFilterContent.anchoredPosition = new Vector2(220f, -28f);
+
+            UnityEngine.UI.Image contentBg = contentObj.AddComponent<UnityEngine.UI.Image>();
+            contentBg.color = new Color(0.015f, 0.022f, 0.032f, 0.94f);
+            contentBg.raycastTarget = true;
+
+            GameObject tabObj = CreateUIObject("SearchFilterTab", _root);
+            _searchFilterTab = tabObj.GetComponent<RectTransform>();
+            _searchFilterTab.anchorMin = _searchFilterTab.anchorMax = new Vector2(0.5f, 1f);
+            _searchFilterTab.pivot = new Vector2(0.5f, 1f);
+            _searchFilterTab.sizeDelta = new Vector2(SearchFilterTabWidth, SearchFilterTabHeight);
+            _searchFilterTab.anchoredPosition = new Vector2(220f, -4f);
+
+            UnityEngine.UI.Image tabBg = tabObj.AddComponent<UnityEngine.UI.Image>();
+            tabBg.color = new Color(0.045f, 0.060f, 0.078f, 0.98f);
+            tabBg.raycastTarget = true;
+
+            UnityEngine.UI.Button tabButton = tabObj.AddComponent<UnityEngine.UI.Button>();
+            tabButton.targetGraphic = tabBg;
+            tabButton.onClick.AddListener(ToggleSearchFilterFlyout);
+
+            _searchFilterTabText = CreateText(
+                "Text",
+                _searchFilterTab,
+                12,
+                UnityEngine.TextAnchor.MiddleCenter);
+            Stretch(_searchFilterTabText.rectTransform);
+            _searchFilterTabText.fontStyle = UnityEngine.FontStyle.Bold;
+            _searchFilterTabText.raycastTarget = false;
+
+            SetSearchFilterExpanded(false);
+        }
+
+        private void ToggleSearchFilterFlyout()
+        {
+            SetSearchFilterExpanded(!_searchFilterExpanded);
+        }
+
+        private void SetSearchFilterExpanded(bool expanded)
+        {
+            _searchFilterExpanded = expanded;
+
+            if (_searchFilterContent != null)
+                _searchFilterContent.gameObject.SetActive(expanded);
+
+            if (!expanded)
+            {
+                if (_matrixFilterMenu != null)
+                    _matrixFilterMenu.gameObject.SetActive(false);
+                if (_combatFilterMenu != null)
+                    _combatFilterMenu.gameObject.SetActive(false);
+            }
+
+            if (_searchFilterTabText != null)
+                _searchFilterTabText.text = expanded
+                    ? "Search / Filters ▲"
+                    : "Search / Filters ▼";
+        }
+
+        private bool PointerInside(RectTransform rect)
+        {
+            if (rect == null || !rect.gameObject.activeInHierarchy)
+                return false;
+
+            Canvas canvas = rect.GetComponentInParent<Canvas>();
+            Camera camera = null;
+            if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+                camera = canvas.worldCamera;
+
+            return RectTransformUtility.RectangleContainsScreenPoint(rect, Input.mousePosition, camera);
+        }
+
+        private void UpdateNodeResearchWingHoverStates()
+        {
+            if (_nodes == null || _nodes.Count == 0)
+                return;
+
+            foreach (NodeView node in _nodes.Values)
+            {
+                if (node == null || node.Root == null || node.Proto == null)
+                    continue;
+
+                bool overNode = PointerInside(node.Root);
+                bool overWing = node.ResearchWingOpen &&
+                                node.ResearchWingRect != null &&
+                                PointerInside(node.ResearchWingRect);
+                bool selected = _selectedTechId == node.Proto.ID;
+
+                bool shouldOpen = selected || overNode || overWing;
+                bool combinedHover = overNode || overWing;
+
+                if (node.Hovered == combinedHover &&
+                    node.ResearchWingOpen == shouldOpen)
+                    continue;
+
+                node.Hovered = combinedHover;
+                node.ResearchWingOpen = shouldOpen;
+                RefreshNodeResearchWing(node);
+            }
+        }
+
+        private void UpdateSearchFilterFlyout()
+        {
+            if (_searchFilterTab == null || _searchFilterContent == null)
+                return;
+
+            bool searchFocused = _searchInput != null && _searchInput.isFocused;
+            bool overTab = PointerInside(_searchFilterTab);
+            bool overContent = _searchFilterExpanded && PointerInside(_searchFilterContent);
+            bool overMatrixMenu = _matrixFilterMenu != null &&
+                                  _matrixFilterMenu.gameObject.activeSelf &&
+                                  PointerInside(_matrixFilterMenu);
+            bool overCombatMenu = _combatFilterMenu != null &&
+                                  _combatFilterMenu.gameObject.activeSelf &&
+                                  PointerInside(_combatFilterMenu);
+
+            if (searchFocused || overTab || overContent || overMatrixMenu || overCombatMenu)
+            {
+                if (!_searchFilterExpanded)
+                    SetSearchFilterExpanded(true);
+            }
+            else if (_searchFilterExpanded)
+            {
+                SetSearchFilterExpanded(false);
+            }
+        }
+
         private void CreateSearchBox()
         {
-            GameObject searchObj = CreateUIObject("Search", _root);
+            GameObject searchObj = CreateUIObject("Search", _searchFilterContent);
             RectTransform searchRect = searchObj.GetComponent<RectTransform>();
             searchRect.anchorMin = searchRect.anchorMax = new Vector2(0.5f, 1f);
             searchRect.pivot = new Vector2(0.5f, 1f);
             searchRect.sizeDelta = new Vector2(390f, 36f);
-            searchRect.anchoredPosition = new Vector2(-40f, -72f);
+            searchRect.anchoredPosition = new Vector2(0f, -6f);
 
             UnityEngine.UI.Image bg = searchObj.AddComponent<UnityEngine.UI.Image>();
             bg.color = new Color(0.035f, 0.048f, 0.064f, 0.98f);
@@ -536,12 +992,12 @@ namespace DSPTechTreeUX
             clearText.raycastTarget = false;
             clearText.color = new Color(0.80f, 0.86f, 0.92f, 1f);
 
-            _searchStatus = CreateText("SearchStatus", _root, 12, UnityEngine.TextAnchor.UpperCenter);
+            _searchStatus = CreateText("SearchStatus", _searchFilterContent, 12, UnityEngine.TextAnchor.UpperCenter);
             RectTransform statusRect = _searchStatus.rectTransform;
             statusRect.anchorMin = statusRect.anchorMax = new Vector2(0.5f, 1f);
             statusRect.pivot = new Vector2(0.5f, 1f);
             statusRect.sizeDelta = new Vector2(390f, 22f);
-            statusRect.anchoredPosition = new Vector2(-40f, -148f);
+            statusRect.anchoredPosition = new Vector2(0f, -114f);
             _searchStatus.color = new Color(0.68f, 0.76f, 0.84f, 0.95f);
             _searchStatus.text = "";
 
@@ -550,63 +1006,206 @@ namespace DSPTechTreeUX
 
         private void CreateFilterBar()
         {
-            // Two compact cycle buttons under the search box. They only toggle existing
-            // nodes/edges; the graph is not rebuilt or repositioned by filtering.
-            GameObject matrixObj = CreateUIObject("MatrixFilter", _root);
+            GameObject matrixObj = CreateUIObject("MatrixFilter", _searchFilterContent);
             RectTransform matrixRect = matrixObj.GetComponent<RectTransform>();
             matrixRect.anchorMin = matrixRect.anchorMax = new Vector2(0.5f, 1f);
             matrixRect.pivot = new Vector2(0.5f, 1f);
             matrixRect.sizeDelta = new Vector2(190f, 30f);
-            matrixRect.anchoredPosition = new Vector2(-142f, -112f);
+            matrixRect.anchoredPosition = new Vector2(-102f, -46f);
 
             UnityEngine.UI.Image matrixBg = matrixObj.AddComponent<UnityEngine.UI.Image>();
             matrixBg.color = new Color(0.045f, 0.060f, 0.078f, 0.96f);
             _matrixFilterButton = matrixObj.AddComponent<UnityEngine.UI.Button>();
             _matrixFilterButton.targetGraphic = matrixBg;
-            _matrixFilterButton.onClick.AddListener(CycleMatrixFilter);
+            _matrixFilterButton.onClick.AddListener(ToggleMatrixFilterMenu);
 
             _matrixFilterText = CreateText("Text", matrixRect, 13, UnityEngine.TextAnchor.MiddleCenter);
             Stretch(_matrixFilterText.rectTransform);
             _matrixFilterText.fontStyle = UnityEngine.FontStyle.Bold;
             _matrixFilterText.raycastTarget = false;
 
-            GameObject combatObj = CreateUIObject("CombatFilter", _root);
+            GameObject combatObj = CreateUIObject("CombatFilter", _searchFilterContent);
             RectTransform combatRect = combatObj.GetComponent<RectTransform>();
             combatRect.anchorMin = combatRect.anchorMax = new Vector2(0.5f, 1f);
             combatRect.pivot = new Vector2(0.5f, 1f);
             combatRect.sizeDelta = new Vector2(190f, 30f);
-            combatRect.anchoredPosition = new Vector2(62f, -112f);
+            combatRect.anchoredPosition = new Vector2(102f, -46f);
 
             UnityEngine.UI.Image combatBg = combatObj.AddComponent<UnityEngine.UI.Image>();
             combatBg.color = new Color(0.045f, 0.060f, 0.078f, 0.96f);
             _combatFilterButton = combatObj.AddComponent<UnityEngine.UI.Button>();
             _combatFilterButton.targetGraphic = combatBg;
-            _combatFilterButton.onClick.AddListener(CycleCombatFilter);
+            _combatFilterButton.onClick.AddListener(ToggleCombatFilterMenu);
 
             _combatFilterText = CreateText("Text", combatRect, 13, UnityEngine.TextAnchor.MiddleCenter);
             Stretch(_combatFilterText.rectTransform);
             _combatFilterText.fontStyle = UnityEngine.FontStyle.Bold;
             _combatFilterText.raycastTarget = false;
 
+            GameObject infiniteObj = CreateUIObject("InfiniteOnly", _searchFilterContent);
+            RectTransform infiniteRect = infiniteObj.GetComponent<RectTransform>();
+            infiniteRect.anchorMin = infiniteRect.anchorMax = new Vector2(0.5f, 1f);
+            infiniteRect.pivot = new Vector2(0.5f, 1f);
+            infiniteRect.sizeDelta = new Vector2(190f, 26f);
+            infiniteRect.anchoredPosition = new Vector2(0f, -80f);
+
+            UnityEngine.UI.Image infiniteBg = infiniteObj.AddComponent<UnityEngine.UI.Image>();
+            infiniteBg.color = new Color(0.045f, 0.060f, 0.078f, 0.96f);
+            _infiniteOnlyButton = infiniteObj.AddComponent<UnityEngine.UI.Button>();
+            _infiniteOnlyButton.targetGraphic = infiniteBg;
+            _infiniteOnlyButton.onClick.AddListener(ToggleInfiniteOnly);
+
+            _infiniteOnlyText = CreateText(
+                "Text",
+                infiniteRect,
+                13,
+                UnityEngine.TextAnchor.MiddleCenter);
+            Stretch(_infiniteOnlyText.rectTransform);
+            _infiniteOnlyText.fontStyle = UnityEngine.FontStyle.Bold;
+            _infiniteOnlyText.raycastTarget = false;
+
+            _matrixFilterMenu = CreateFilterMenu(
+                "MatrixFilterMenu",
+                -102f,
+                new string[]
+                {
+                    "All",
+                    "Blue",
+                    "≤ Red",
+                    "≤ Yellow",
+                    "≤ Purple",
+                    "≤ Green",
+                    "White"
+                },
+                true);
+
+            _combatFilterMenu = CreateFilterMenu(
+                "CombatFilterMenu",
+                102f,
+                new string[]
+                {
+                    "All",
+                    "Utility",
+                    "Hidden"
+                },
+                false);
+
             RefreshFilterLabels();
         }
 
-        private void CycleMatrixFilter()
+        private RectTransform CreateFilterMenu(
+            string name,
+            float x,
+            string[] labels,
+            bool matrixMenu)
         {
-            // All -> Blue -> <= Red -> <= Yellow -> <= Purple -> <= Green -> White -> All
-            _matrixFilter++;
-            if (_matrixFilter > 5)
-                _matrixFilter = -1;
+            const float optionHeight = 26f;
+
+            GameObject menuObj = CreateUIObject(name, _searchFilterContent);
+            RectTransform menuRect = menuObj.GetComponent<RectTransform>();
+            menuRect.anchorMin = menuRect.anchorMax = new Vector2(0.5f, 1f);
+            menuRect.pivot = new Vector2(0.5f, 1f);
+            menuRect.sizeDelta = new Vector2(190f, labels.Length * optionHeight + 4f);
+            menuRect.anchoredPosition = new Vector2(x, -78f);
+
+            UnityEngine.UI.Image menuBg = menuObj.AddComponent<UnityEngine.UI.Image>();
+            menuBg.color = new Color(0.018f, 0.026f, 0.038f, 0.995f);
+            menuBg.raycastTarget = true;
+
+            for (int i = 0; i < labels.Length; i++)
+            {
+                int value = matrixMenu ? i - 1 : i;
+
+                GameObject optionObj = CreateUIObject("Option_" + i, menuRect);
+                RectTransform optionRect = optionObj.GetComponent<RectTransform>();
+                optionRect.anchorMin = optionRect.anchorMax = new Vector2(0.5f, 1f);
+                optionRect.pivot = new Vector2(0.5f, 1f);
+                optionRect.sizeDelta = new Vector2(184f, optionHeight - 1f);
+                optionRect.anchoredPosition = new Vector2(0f, -2f - i * optionHeight);
+
+                UnityEngine.UI.Image optionBg = optionObj.AddComponent<UnityEngine.UI.Image>();
+                optionBg.color = new Color(0.050f, 0.066f, 0.086f, 0.99f);
+
+                UnityEngine.UI.Button optionButton = optionObj.AddComponent<UnityEngine.UI.Button>();
+                optionButton.targetGraphic = optionBg;
+
+                if (matrixMenu)
+                    optionButton.onClick.AddListener(delegate { SetMatrixFilter(value); });
+                else
+                    optionButton.onClick.AddListener(delegate { SetCombatFilter(value); });
+
+                UnityEngine.UI.Text optionText = CreateText(
+                    "Text",
+                    optionRect,
+                    13,
+                    UnityEngine.TextAnchor.MiddleCenter);
+                Stretch(optionText.rectTransform);
+                optionText.text = labels[i];
+                optionText.raycastTarget = false;
+            }
+
+            menuRect.SetAsLastSibling();
+            menuObj.SetActive(false);
+            return menuRect;
+        }
+
+        private void ToggleMatrixFilterMenu()
+        {
+            if (_matrixFilterMenu == null)
+                return;
+
+            bool show = !_matrixFilterMenu.gameObject.activeSelf;
+
+            if (_combatFilterMenu != null)
+                _combatFilterMenu.gameObject.SetActive(false);
+
+            _matrixFilterMenu.gameObject.SetActive(show);
+            if (show)
+                _matrixFilterMenu.SetAsLastSibling();
+        }
+
+        private void ToggleCombatFilterMenu()
+        {
+            if (_combatFilterMenu == null)
+                return;
+
+            bool show = !_combatFilterMenu.gameObject.activeSelf;
+
+            if (_matrixFilterMenu != null)
+                _matrixFilterMenu.gameObject.SetActive(false);
+
+            _combatFilterMenu.gameObject.SetActive(show);
+            if (show)
+                _combatFilterMenu.SetAsLastSibling();
+        }
+
+        private void ToggleInfiniteOnly()
+        {
+            if (_builtPage != 1)
+                return;
+
+            _infiniteOnly = !_infiniteOnly;
+            RefreshFilterLabels();
+            ApplyFilters();
+        }
+
+        private void SetMatrixFilter(int value)
+        {
+            _matrixFilter = Mathf.Clamp(value, -1, 5);
+
+            if (_matrixFilterMenu != null)
+                _matrixFilterMenu.gameObject.SetActive(false);
 
             RefreshFilterLabels();
             ApplyFilters();
         }
 
-        private void CycleCombatFilter()
+        private void SetCombatFilter(int value)
         {
-            _combatFilter++;
-            if (_combatFilter > 2)
-                _combatFilter = 0;
+            _combatFilter = Mathf.Clamp(value, 0, 2);
+
+            if (_combatFilterMenu != null)
+                _combatFilterMenu.gameObject.SetActive(false);
 
             RefreshFilterLabels();
             ApplyFilters();
@@ -618,13 +1217,13 @@ namespace DSPTechTreeUX
             {
                 switch (_matrixFilter)
                 {
-                    case 0: _matrixFilterText.text = "Matrix: Blue"; break;
-                    case 1: _matrixFilterText.text = "Matrix: ≤ Red"; break;
-                    case 2: _matrixFilterText.text = "Matrix: ≤ Yellow"; break;
-                    case 3: _matrixFilterText.text = "Matrix: ≤ Purple"; break;
-                    case 4: _matrixFilterText.text = "Matrix: ≤ Green"; break;
-                    case 5: _matrixFilterText.text = "Matrix: White"; break;
-                    default: _matrixFilterText.text = "Matrix: All"; break;
+                    case 0: _matrixFilterText.text = "Matrix: Blue ▼"; break;
+                    case 1: _matrixFilterText.text = "Matrix: ≤ Red ▼"; break;
+                    case 2: _matrixFilterText.text = "Matrix: ≤ Yellow ▼"; break;
+                    case 3: _matrixFilterText.text = "Matrix: ≤ Purple ▼"; break;
+                    case 4: _matrixFilterText.text = "Matrix: ≤ Green ▼"; break;
+                    case 5: _matrixFilterText.text = "Matrix: White ▼"; break;
+                    default: _matrixFilterText.text = "Matrix: All ▼"; break;
                 }
             }
 
@@ -632,10 +1231,24 @@ namespace DSPTechTreeUX
             {
                 switch (_combatFilter)
                 {
-                    case 1: _combatFilterText.text = "Combat: Utility"; break;
-                    case 2: _combatFilterText.text = "Combat: Hidden"; break;
-                    default: _combatFilterText.text = "Combat: All"; break;
+                    case 1: _combatFilterText.text = "Combat: Utility ▼"; break;
+                    case 2: _combatFilterText.text = "Combat: Hidden ▼"; break;
+                    default: _combatFilterText.text = "Combat: All ▼"; break;
                 }
+            }
+
+            bool onUpgradesPage = _builtPage == 1;
+
+            if (_infiniteOnlyButton != null)
+                _infiniteOnlyButton.interactable = onUpgradesPage;
+
+            if (_infiniteOnlyText != null)
+            {
+                _infiniteOnlyText.text =
+                    _infiniteOnly ? "Infinite only: ON" : "Infinite only: OFF";
+                _infiniteOnlyText.color = onUpgradesPage
+                    ? Color.white
+                    : new Color(0.45f, 0.48f, 0.52f, 1f);
             }
         }
 
@@ -671,10 +1284,14 @@ namespace DSPTechTreeUX
                 node.Root.gameObject.SetActive(NodePassesFilters(node.Proto));
             }
 
-            // Combat filtering is the one case where we compact the layout itself.
-            // Only fully emptied horizontal rows are removed; X positions remain exactly
-            // vanilla-derived so unrelated branches do not shuffle around.
-            if (_combatFilter != 0)
+            // The normal graph keeps vanilla-derived positions. Two filtered views
+            // deliberately compact:
+            //  * combat filtering removes empty rows only;
+            //  * White-matrix upgrades become a focused late-game research layout,
+            //    preserving one upgrade family per row and stage order left-to-right.
+            if (_builtPage == 1 && _matrixFilter == 5)
+                CompactWhiteUpgradeFamilies();
+            else if (_combatFilter != 0)
                 CompactVisibleRows();
 
             CacheVisibleBounds(_builtPage);
@@ -686,12 +1303,174 @@ namespace DSPTechTreeUX
 
             // A filter is a view change, so frame the surviving content immediately.
             // This is especially useful for the White-only endgame view.
-            if (_matrixFilter >= 0 || _combatFilter != 0)
+            if (_matrixFilter >= 0 || _combatFilter != 0 || (_builtPage == 1 && _infiniteOnly))
                 CenterViewOnVisibleNodes(_builtPage);
 
             RefreshNodeStates();
             RefreshEdges();
             RefreshSearchStatus();
+        }
+
+        private void CompactWhiteUpgradeFamilies()
+        {
+            if (_builtPage != 1 || _nodes == null)
+                return;
+
+            List<float> visibleRows = new List<float>();
+            float minOriginalX = float.MaxValue;
+
+            foreach (NodeView node in _nodes.Values)
+            {
+                if (node == null || node.Root == null || !node.Root.gameObject.activeSelf)
+                    continue;
+
+                AddUniqueRow(visibleRows, node.OriginalPosition.y);
+                minOriginalX = Mathf.Min(minOriginalX, node.OriginalPosition.x);
+            }
+
+            if (visibleRows.Count == 0)
+                return;
+
+            visibleRows.Sort((a, b) => b.CompareTo(a));
+
+            // Leave enough headroom for the level label plus the separate percentage
+            // label above it. This is deliberately a little roomier than the normal tree.
+            float rowGap = Mathf.Max(
+                GetTypicalRowGapForPage(1),
+                NodeSize + 132f);
+
+            float stageGap = Mathf.Max(
+                GetTypicalColumnGapForPage(1),
+                NodeSize + 110f);
+
+            int rowsPerColumn = (visibleRows.Count + 1) / 2;
+
+            // Determine how wide the widest family is, then place the second block far
+            // enough away that its stages cannot overlap the first block.
+            int maxFamilyCount = 1;
+            for (int r = 0; r < visibleRows.Count; r++)
+            {
+                int count = 0;
+                foreach (NodeView node in _nodes.Values)
+                {
+                    if (node == null || node.Root == null || !node.Root.gameObject.activeSelf)
+                        continue;
+
+                    if (Mathf.Abs(node.OriginalPosition.y - visibleRows[r]) < 0.1f)
+                        count++;
+                }
+
+                if (count > maxFamilyCount)
+                    maxFamilyCount = count;
+            }
+
+            float familyWidth =
+                (maxFamilyCount - 1) * stageGap + NodeSize;
+
+            float blockGap = NodeSize + 180f;
+            float secondColumnX = minOriginalX + familyWidth + blockGap;
+            float topY = visibleRows[0];
+
+            for (int row = 0; row < visibleRows.Count; row++)
+            {
+                float originalY = visibleRows[row];
+                List<NodeView> family = new List<NodeView>();
+
+                foreach (NodeView node in _nodes.Values)
+                {
+                    if (node == null || node.Root == null || !node.Root.gameObject.activeSelf)
+                        continue;
+
+                    if (Mathf.Abs(node.OriginalPosition.y - originalY) < 0.1f)
+                        family.Add(node);
+                }
+
+                family.Sort((a, b) =>
+                    a.OriginalPosition.x.CompareTo(b.OriginalPosition.x));
+
+                int block = row / rowsPerColumn;
+                int rowInBlock = row % rowsPerColumn;
+
+                float startX = block == 0 ? minOriginalX : secondColumnX;
+                float y = topY - rowInBlock * rowGap;
+
+                for (int col = 0; col < family.Count; col++)
+                {
+                    family[col].Root.anchoredPosition =
+                        new Vector2(startX + col * stageGap, y);
+                }
+            }
+        }
+
+        private float GetTypicalRowGapForPage(int page)
+        {
+            if (page < 0 || page >= 2)
+                return 0f;
+
+            List<float> rows = new List<float>();
+
+            foreach (NodeView node in _pageNodes[page].Values)
+            {
+                if (node == null)
+                    continue;
+
+                AddUniqueRow(rows, node.OriginalPosition.y);
+            }
+
+            if (rows.Count < 2)
+                return 0f;
+
+            rows.Sort((a, b) => b.CompareTo(a));
+            return GetTypicalRowGap(rows);
+        }
+
+        private float GetTypicalColumnGapForPage(int page)
+        {
+            if (page < 0 || page >= 2)
+                return 0f;
+
+            List<float> gaps = new List<float>();
+            List<float> rows = new List<float>();
+
+            foreach (NodeView node in _pageNodes[page].Values)
+            {
+                if (node == null)
+                    continue;
+
+                AddUniqueRow(rows, node.OriginalPosition.y);
+            }
+
+            for (int r = 0; r < rows.Count; r++)
+            {
+                List<float> xs = new List<float>();
+
+                foreach (NodeView node in _pageNodes[page].Values)
+                {
+                    if (node == null)
+                        continue;
+
+                    if (Mathf.Abs(node.OriginalPosition.y - rows[r]) < 0.1f)
+                        xs.Add(node.OriginalPosition.x);
+                }
+
+                if (xs.Count < 2)
+                    continue;
+
+                xs.Sort();
+
+                for (int i = 0; i + 1 < xs.Count; i++)
+                {
+                    float gap = xs[i + 1] - xs[i];
+                    if (gap > NodeSize + 1f)
+                        gaps.Add(gap);
+                }
+            }
+
+            if (gaps.Count == 0)
+                return 0f;
+
+            gaps.Sort();
+            return gaps[gaps.Count / 2];
         }
 
         private void CompactVisibleRows()
@@ -918,6 +1697,11 @@ namespace DSPTechTreeUX
             if (!PassesMatrixFilter(proto))
                 return false;
 
+            if (_builtPage == 1 &&
+                _infiniteOnly &&
+                !IsInfiniteUpgrade(proto))
+                return false;
+
             if (_combatFilter == 0 || !IsCombatProto(proto))
                 return true;
 
@@ -945,6 +1729,16 @@ namespace DSPTechTreeUX
             // "White" is deliberately distinct from All: show technologies whose
             // effective prerequisite tier actually reaches Universe Matrix.
             return tier == 5;
+        }
+
+        private static bool IsInfiniteUpgrade(TechProto proto)
+        {
+            if (proto == null || proto.ID <= 1999)
+                return false;
+
+            // DSP 0.10.34 uses MaxLevel > 20 as its repeatable/infinite-upgrade
+            // special case in ACH_UnlockAllTech.
+            return proto.MaxLevel > 20;
         }
 
         private bool IsCombatProto(TechProto proto)
@@ -1362,6 +2156,19 @@ namespace DSPTechTreeUX
             Stretch(_researchButtonText.rectTransform);
             _researchButtonText.fontStyle = UnityEngine.FontStyle.Bold;
             _researchButtonText.raycastTarget = false;
+
+            _detailEmptyPrompt = CreateText(
+                "EmptyPrompt",
+                _detailPanel,
+                14,
+                UnityEngine.TextAnchor.MiddleCenter);
+            Stretch(_detailEmptyPrompt.rectTransform);
+            _detailEmptyPrompt.rectTransform.offsetMin = new Vector2(10f, 5f);
+            _detailEmptyPrompt.rectTransform.offsetMax = new Vector2(-10f, -5f);
+            _detailEmptyPrompt.text = "Please select a technology";
+            _detailEmptyPrompt.color = new Color(0.82f, 0.87f, 0.92f, 1f);
+            _detailEmptyPrompt.raycastTarget = false;
+            _detailEmptyPrompt.gameObject.SetActive(false);
         }
 
         private void CreateLegend()
@@ -1371,9 +2178,9 @@ namespace DSPTechTreeUX
             r.anchorMin = new Vector2(0f, 0f);
             r.anchorMax = new Vector2(0f, 0f);
             r.pivot = new Vector2(0f, 0f);
-            r.sizeDelta = new Vector2(760f, 28f);
+            r.sizeDelta = new Vector2(1160f, 28f);
             r.anchoredPosition = new Vector2(152f, 10f);
-            _legend.text = "Blue = complete   Green = researchable   Orange = prerequisite locked   •   Search = highlight names   •   Wheel = zoom   •   Drag = pan";
+            _legend.text = "Blue = complete   Green = researchable   Orange = prerequisite locked   •   Q+ = add this tech to the research queue   •   Search = highlight names   •   Wheel = zoom   •   Drag = pan";
             _legend.color = new Color(0.76f, 0.82f, 0.89f, 1f);
         }
 
@@ -1503,6 +2310,13 @@ namespace DSPTechTreeUX
             // Research inputs are predominantly matrices, but keeping this generic also
             // makes the search/dependency model behave correctly for modded tech data.
             Dictionary<int, int> unlockTechByItem = new Dictionary<int, int>();
+            HashSet<int> pageTechIds = new HashSet<int>();
+
+            for (int i = 0; i < protos.Count; i++)
+            {
+                if (protos[i] != null)
+                    pageTechIds.Add(protos[i].ID);
+            }
 
             for (int i = 0; i < protos.Count; i++)
             {
@@ -1555,22 +2369,10 @@ namespace DSPTechTreeUX
                     if (rawAncestors.Contains(unlockTechId))
                         continue;
 
-                    if (!_nodes.ContainsKey(unlockTechId))
-                    {
-                        // Nodes are created after this pass, so check page membership via
-                        // the prototype list rather than the node dictionary.
-                        bool onPage = false;
-                        for (int k = 0; k < protos.Count; k++)
-                        {
-                            if (protos[k] != null && protos[k].ID == unlockTechId)
-                            {
-                                onPage = true;
-                                break;
-                            }
-                        }
-                        if (!onPage)
-                            continue;
-                    }
+                    // Nodes are created after this pass, so use the page's prototype
+                    // ID set rather than probing the node dictionary.
+                    if (!pageTechIds.Contains(unlockTechId))
+                        continue;
 
                     if (inferred == null)
                         inferred = new List<int>();
@@ -1885,6 +2687,9 @@ namespace DSPTechTreeUX
             UnityEngine.UI.Text level = CreateText("Text", lr, 30, UnityEngine.TextAnchor.MiddleLeft);
             Stretch(level.rectTransform);
             level.fontStyle = UnityEngine.FontStyle.Bold;
+            level.horizontalOverflow = UnityEngine.HorizontalWrapMode.Overflow;
+            level.verticalOverflow = UnityEngine.VerticalWrapMode.Overflow;
+            level.lineSpacing = 0.92f;
             level.raycastTarget = false;
 
             RectTransform pipGroup = CreateUIObject("MatrixIcons", rect).GetComponent<RectTransform>();
@@ -1932,6 +2737,45 @@ namespace DSPTechTreeUX
                 iconX += matrixIconPitch;
             }
 
+            GameObject researchWingObj = CreateUIObject("ResearchWing", rect);
+            RectTransform researchWingRect = researchWingObj.GetComponent<RectTransform>();
+            researchWingRect.anchorMin = researchWingRect.anchorMax = new Vector2(1f, 0f);
+            researchWingRect.pivot = new Vector2(0f, 0f);
+            researchWingRect.sizeDelta = new Vector2(62f, NodeSize);
+            researchWingRect.anchoredPosition = new Vector2(-3f, 0f);
+
+            TechTreeResearchWingGraphic researchWingGraphic =
+                researchWingObj.AddComponent<TechTreeResearchWingGraphic>();
+            researchWingGraphic.raycastTarget = true;
+            researchWingGraphic.BorderColor = ReadyColor;
+            researchWingGraphic.FillColor = NodeInnerColor;
+            researchWingGraphic.ArrowColor = new Color(0.28f, 0.78f, 1f, 1f);
+
+            UnityEngine.UI.Button researchWingButton =
+                researchWingObj.AddComponent<UnityEngine.UI.Button>();
+            researchWingButton.targetGraphic = researchWingGraphic;
+            researchWingButton.transition = UnityEngine.UI.Selectable.Transition.None;
+            researchWingButton.onClick.AddListener(delegate { QueueTechFromNode(techId); });
+
+            UnityEngine.CanvasGroup researchWingCanvas =
+                researchWingObj.AddComponent<UnityEngine.CanvasGroup>();
+            researchWingCanvas.alpha = 0f;
+            researchWingCanvas.interactable = false;
+            researchWingCanvas.blocksRaycasts = false;
+
+            UnityEngine.UI.Text researchWingText =
+                CreateText("QueueLabel", researchWingRect, 36, UnityEngine.TextAnchor.MiddleCenter);
+            Stretch(researchWingText.rectTransform);
+            researchWingText.text = "Q+";
+            researchWingText.fontStyle = UnityEngine.FontStyle.Bold;
+            researchWingText.color = new Color(0.32f, 0.80f, 1f, 1f);
+            researchWingText.raycastTarget = false;
+
+            UnityEngine.UI.Outline researchWingGlow =
+                researchWingText.gameObject.AddComponent<UnityEngine.UI.Outline>();
+            researchWingGlow.effectColor = new Color(0.10f, 0.52f, 1f, 0.95f);
+            researchWingGlow.effectDistance = new Vector2(1.4f, -1.4f);
+
             NodeView node = new NodeView
             {
                 Proto = proto,
@@ -1944,10 +2788,70 @@ namespace DSPTechTreeUX
                 LevelBadge = levelBadgeObj,
                 CanvasGroup = canvasGroup,
                 DirectMatrixMask = directMask,
-                Pips = pipImages.ToArray()
+                Pips = pipImages.ToArray(),
+                ResearchWing = researchWingObj,
+                ResearchWingRect = researchWingRect,
+                ResearchWingButton = researchWingButton,
+                ResearchWingGraphic = researchWingGraphic,
+                ResearchWingCanvas = researchWingCanvas
             };
             _nodes[proto.ID] = node;
             UpdateNodeState(node);
+        }
+
+        private void RefreshNodeResearchWing(NodeView node)
+        {
+            if (node == null ||
+                node.Proto == null ||
+                node.ResearchWing == null ||
+                node.ResearchWingCanvas == null)
+                return;
+
+            if (GameMain.history == null || node.Root == null || !node.Root.gameObject.activeSelf)
+            {
+                node.ResearchWingCanvas.alpha = 0f;
+                node.ResearchWingCanvas.interactable = false;
+                node.ResearchWingCanvas.blocksRaycasts = false;
+                return;
+            }
+
+            TechState state = GameMain.history.TechState(node.Proto.ID);
+            bool complete = state.unlocked;
+            bool ready = !complete && IsTechReadyByMap(node.Proto.ID);
+            bool canQueue = ready && GameMain.history.CanEnqueueTech(node.Proto.ID);
+
+            bool visible = node.ResearchWingOpen && canQueue;
+
+            node.ResearchWingCanvas.alpha = visible ? 1f : 0f;
+            node.ResearchWingCanvas.interactable = visible;
+            node.ResearchWingCanvas.blocksRaycasts = visible;
+
+            if (node.ResearchWingButton != null)
+                node.ResearchWingButton.interactable = visible;
+
+            if (node.ResearchWingGraphic != null)
+            {
+                Color borderColor = node.Border != null ? node.Border.color : ReadyColor;
+                node.ResearchWingGraphic.SetColors(borderColor, NodeInnerColor);
+            }
+        }
+
+        private void QueueTechFromNode(int techId)
+        {
+            if (techId == 0 || GameMain.history == null)
+                return;
+
+            if (!IsTechReadyByMap(techId))
+                return;
+
+            if (!GameMain.history.CanEnqueueTech(techId))
+                return;
+
+            GameMain.history.EnqueueTech(techId);
+            RefreshNodeStates();
+
+            if (_selectedTechId != 0)
+                PopulateDetails(_selectedTechId);
         }
 
         internal void ClearSelection()
@@ -2046,14 +2950,8 @@ namespace DSPTechTreeUX
 
         private bool IsPrerequisiteSatisfied(int techId, bool requireMaxLevel)
         {
-            if (GameMain.history == null)
-                return false;
-
-            TechState state = GameMain.history.TechState(techId);
-            if (requireMaxLevel)
-                return state.unlocked && state.curLevel >= state.maxLevel;
-
-            return state.unlocked;
+            return GameMain.history != null &&
+                   GameMain.history.TechUnlocked(techId, requireMaxLevel);
         }
 
         private bool IsTechReadyByMap(int techId)
@@ -2089,7 +2987,7 @@ namespace DSPTechTreeUX
 
             return InferredPrerequisiteChainSatisfiedBefore(
                 techId,
-                GameMain.history.techQueue != null ? GameMain.history.techQueue.Length : int.MaxValue,
+                GameMain.history.techQueueLength,
                 new HashSet<int>());
         }
 
@@ -2177,6 +3075,181 @@ namespace DSPTechTreeUX
             return -1;
         }
 
+        private bool IsImmediateDescendantOfSelected(int techId)
+        {
+            if (_selectedTechId == 0 || techId == 0 || GameMain.history == null)
+                return false;
+
+            bool isDirectChild = false;
+            for (int i = 0; i < _edges.Count; i++)
+            {
+                EdgeView edge = _edges[i];
+                if (edge != null &&
+                    edge.FromId == _selectedTechId &&
+                    edge.ToId == techId)
+                {
+                    isDirectChild = true;
+                    break;
+                }
+            }
+
+            if (!isDirectChild)
+                return false;
+
+            // If it is already ready, keep the immediate child at full emphasis.
+            if (IsTechReadyByMap(techId))
+                return true;
+
+            // Otherwise only preserve it if queueing the selected technology would
+            // actually make this child researchable.
+            return WouldBecomeReadyAfterQueueingSelected(techId);
+        }
+
+        private bool WouldBecomeReadyAfterQueueingSelected(int childTechId)
+        {
+            if (GameMain.history == null || _selectedTechId == 0)
+                return false;
+
+            TechProto child = LDB.techs.Select(childTechId);
+            if (child == null)
+                return false;
+
+            TechState childState = GameMain.history.TechState(childTechId);
+            if (childState.unlocked)
+                return false;
+
+            // The selected tech must itself be a valid queue entry (unless it is
+            // already unlocked/queued).
+            TechState selectedState = GameMain.history.TechState(_selectedTechId);
+            bool selectedAlreadySatisfied =
+                selectedState.unlocked || FindFirstQueueIndex(_selectedTechId) >= 0;
+
+            if (!selectedAlreadySatisfied)
+            {
+                if (!IsTechReadyByMap(_selectedTechId) ||
+                    !GameMain.history.CanEnqueueTech(_selectedTechId))
+                    return false;
+            }
+
+            if (!HypotheticalParentArraySatisfied(
+                    child.PreTechs,
+                    child.PreTechsMax,
+                    _selectedTechId))
+                return false;
+
+            if (!HypotheticalParentArraySatisfied(
+                    child.PreTechsImplicit,
+                    child.PreTechsMax,
+                    _selectedTechId))
+                return false;
+
+            // Inferred requirements obey the same "must appear before the child"
+            // rule. The selected tech is treated as the newly appended queue entry.
+            List<int> inferred;
+            if (_inferredParents.TryGetValue(childTechId, out inferred) &&
+                inferred != null)
+            {
+                for (int i = 0; i < inferred.Count; i++)
+                {
+                    int parentId = inferred[i];
+                    TechState parentState = GameMain.history.TechState(parentId);
+
+                    if (parentState.unlocked)
+                        continue;
+
+                    if (parentId == _selectedTechId)
+                        continue;
+
+                    int parentQueueIndex = FindFirstQueueIndex(parentId);
+                    if (parentQueueIndex < 0)
+                        return false;
+
+                    if (!GameMain.history.CheckTechAtQueueIndex(
+                            parentId,
+                            parentQueueIndex))
+                        return false;
+
+                    if (!InferredPrerequisiteChainSatisfiedBefore(
+                            parentId,
+                            parentQueueIndex,
+                            new HashSet<int>()))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool HypotheticalParentArraySatisfied(
+            int[] parents,
+            bool requireMaxLevel,
+            int hypotheticalQueuedTechId)
+        {
+            if (parents == null || GameMain.history == null)
+                return true;
+
+            for (int i = 0; i < parents.Length; i++)
+            {
+                int parentId = parents[i];
+
+                if (GameMain.history.TechUnlocked(parentId, requireMaxLevel))
+                    continue;
+
+                TechState state = GameMain.history.TechState(parentId);
+                int queuedCount = GameMain.history.TechQueuedCount(parentId);
+
+                if (parentId == hypotheticalQueuedTechId)
+                    queuedCount++;
+
+                if (requireMaxLevel)
+                {
+                    if (queuedCount - 1 + state.curLevel < state.maxLevel)
+                        return false;
+                }
+                else
+                {
+                    if (parentId == hypotheticalQueuedTechId)
+                    {
+                        if (queuedCount <= 0)
+                            return false;
+                    }
+                    else if (!GameMain.history.TechInQueue(parentId))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static Color ScaleRgb(Color color, float factor)
+        {
+            return new Color(
+                Mathf.Clamp01(color.r * factor),
+                Mathf.Clamp01(color.g * factor),
+                Mathf.Clamp01(color.b * factor),
+                color.a);
+        }
+
+        private void SetPipBrightness(NodeView node, float factor)
+        {
+            if (node == null || node.Pips == null)
+                return;
+
+            int index = 0;
+            for (int i = 0; i < MatrixIds.Length; i++)
+            {
+                if ((node.DirectMatrixMask & (1 << i)) == 0)
+                    continue;
+
+                if (index < node.Pips.Length && node.Pips[index] != null)
+                    node.Pips[index].color = ScaleRgb(MatrixColors[i], factor);
+
+                index++;
+            }
+        }
+
         private void RefreshNodeStates()
         {
             foreach (NodeView node in _nodes.Values)
@@ -2184,6 +3257,36 @@ namespace DSPTechTreeUX
 
             if (_builtPage >= 0 && _builtPage < 2)
                 _pageLastStateRefresh[_builtPage] = Time.unscaledTime;
+        }
+
+        private bool HasTightNodeAbove(NodeView node)
+        {
+            if (node == null || node.Root == null || _nodes == null)
+                return false;
+
+            Vector2 p = node.Root.anchoredPosition;
+
+            foreach (NodeView other in _nodes.Values)
+            {
+                if (other == null ||
+                    other == node ||
+                    other.Root == null ||
+                    !other.Root.gameObject.activeSelf)
+                    continue;
+
+                Vector2 q = other.Root.anchoredPosition;
+
+                // Only nodes substantially sharing the same horizontal lane can
+                // collide with the level/progress label above this node.
+                if (Mathf.Abs(q.x - p.x) > NodeSize * 0.75f)
+                    continue;
+
+                float dy = q.y - p.y;
+                if (dy > 0f && dy < NodeSize + 92f)
+                    return true;
+            }
+
+            return false;
         }
 
         private void UpdateNodeState(NodeView node)
@@ -2224,50 +3327,122 @@ namespace DSPTechTreeUX
                 researchProgress = Mathf.Clamp01((float)((double)state.hashUploaded / (double)state.hashNeeded));
 
             string levelText = FormatLevel(node.Proto, state);
-            if (hasStoredProgress)
+
+            if (node.LevelBadge != null && node.Level != null)
             {
-                int percent = Mathf.Clamp(Mathf.FloorToInt(researchProgress * 100f), 0, 99);
-                levelText += "   " + percent + "%";
+                RectTransform badgeRect =
+                    node.LevelBadge.GetComponent<RectTransform>();
+
+                if (hasStoredProgress)
+                {
+                    int percent = Mathf.Clamp(
+                        Mathf.FloorToInt(researchProgress * 100f),
+                        0,
+                        99);
+
+                    if (HasTightNodeAbove(node))
+                    {
+                        // On tightly stacked branches, an extra line would collide
+                        // with the node above. Temporarily replace the level label
+                        // with progress instead.
+                        badgeRect.sizeDelta = new Vector2(126f, 60f);
+                        badgeRect.anchoredPosition = new Vector2(-4f, 16f);
+                        node.Level.alignment = UnityEngine.TextAnchor.MiddleLeft;
+                        levelText = percent + "%";
+                    }
+                    else
+                    {
+                        // With clear space above, show percentage and level together.
+                        // This sits two pixels lower than 0.9.31.
+                        badgeRect.sizeDelta = new Vector2(170f, 104f);
+                        badgeRect.anchoredPosition = new Vector2(-4f, 36f);
+                        node.Level.alignment = UnityEngine.TextAnchor.UpperLeft;
+                        levelText = percent + "%\n" + levelText;
+                    }
+                }
+                else
+                {
+                    badgeRect.sizeDelta = new Vector2(126f, 60f);
+                    badgeRect.anchoredPosition = new Vector2(-4f, 16f);
+                    node.Level.alignment = UnityEngine.TextAnchor.MiddleLeft;
+                }
             }
 
             node.Level.text = levelText;
             if (node.LevelBadge != null)
-                node.LevelBadge.SetActive(ShouldShowNodeLevelBadge(node.Proto, state) || hasStoredProgress);
+                node.LevelBadge.SetActive(
+                    ShouldShowNodeLevelBadge(node.Proto, state) ||
+                    hasStoredProgress);
 
             bool selectedContext = _selectedTechId != 0;
             bool inSelectedPath = selectedContext && _selectedPath.Contains(node.Proto.ID);
+            bool immediateDescendant =
+                selectedContext &&
+                !inSelectedPath &&
+                IsImmediateDescendantOfSelected(node.Proto.ID);
+
             bool searchActive = !string.IsNullOrEmpty(_searchText);
             bool searchMatch = NodeMatchesSearch(node);
+            bool searchDim = searchActive && !searchMatch;
 
-            // Selection/path focus takes precedence over search. With no selected tech,
-            // search behaves as a non-destructive visual filter by greying non-matches.
-            bool dim = selectedContext ? !inSelectedPath : (searchActive && !searchMatch);
-
-            // Fade the complete node as a unit. Keeping the inner panel opaque prevents
-            // the full-size coloured border image from showing through as a solid fill.
             node.Inner.color = NodeInnerColor;
-            if (dim)
+
+            // Never dim the complete node through CanvasGroup alpha. Doing so makes the
+            // full-size coloured border image bleed through the semi-transparent inner
+            // panel. Dim the visible elements directly instead and leave the inner opaque.
+            if (node.CanvasGroup != null)
+                node.CanvasGroup.alpha = 1f;
+
+            if (searchDim)
             {
-                // De-emphasised nodes should lose status/category colour as well as brightness.
-                Color greyBorder = new Color(0.32f, 0.34f, 0.36f, 1f);
-                Color greyContent = new Color(0.52f, 0.54f, 0.56f, 1f);
+                // Search remains the one case where non-matches deliberately go grey.
+                Color greyBorder = new Color(0.30f, 0.32f, 0.35f, 1f);
+                Color greyContent = new Color(0.48f, 0.50f, 0.53f, 1f);
                 node.Border.color = greyBorder;
                 node.Icon.color = greyContent;
                 node.Level.color = greyContent;
+
                 if (node.Pips != null)
                 {
                     for (int i = 0; i < node.Pips.Length; i++)
-                        if (node.Pips[i] != null) node.Pips[i].color = greyContent;
+                    {
+                        if (node.Pips[i] != null)
+                            node.Pips[i].color = greyContent;
+                    }
                 }
-                if (node.CanvasGroup != null) node.CanvasGroup.alpha = 0.42f;
             }
             else
             {
-                node.Icon.color = Color.white;
-                node.Level.color = Color.white;
-                RestorePipColors(node);
-                if (node.CanvasGroup != null) node.CanvasGroup.alpha = 1f;
+                // Selection emphasis:
+                //   selected + unsatisfied prerequisite path = 125%
+                //   immediate descendants                   = 100%
+                //   everything else                         = 75%
+                float emphasis = 1f;
+                if (selectedContext)
+                {
+                    if (inSelectedPath)
+                        emphasis = 1.5f;
+                    else if (immediateDescendant)
+                        emphasis = 1f;
+                    else
+                        emphasis = 0.5f;
+                }
+
+                node.Border.color = ScaleRgb(borderColor, emphasis);
+
+                float contentBrightness = Mathf.Min(emphasis, 1f);
+                Color contentColor = new Color(
+                    contentBrightness,
+                    contentBrightness,
+                    contentBrightness,
+                    1f);
+
+                node.Icon.color = contentColor;
+                node.Level.color = contentColor;
+                SetPipBrightness(node, contentBrightness);
             }
+
+            RefreshNodeResearchWing(node);
         }
 
         private void RefreshEdges()
@@ -2356,19 +3531,36 @@ namespace DSPTechTreeUX
                 return;
 
             _pageViewInitialized[page] = true;
-            _pageZoom[page] = 0.72f;
 
-            float viewportW = _viewport != null ? _viewport.rect.width : 0f;
-            float viewportH = _viewport != null ? _viewport.rect.height : 0f;
-            float scaledW = _pageGraphSize[page].x * _pageZoom[page];
-            float scaledH = _pageGraphSize[page].y * _pageZoom[page];
+            // If DSPModSave supplied non-default view state, preserve it. For a new
+            // save/default state, retain the established vanilla-ish initial framing.
+            TechTreeSavedViewState saved = Plugin.SavedViewState;
+            bool hasSavedView =
+                saved != null &&
+                (Mathf.Abs(saved.Zoom[page] - 0.72f) > 0.0001f ||
+                 saved.Pan[page].sqrMagnitude > 0.0001f);
 
-            float overflowX = Mathf.Max(0f, scaledW - viewportW);
-            float overflowY = Mathf.Max(0f, scaledH - viewportH);
+            if (hasSavedView)
+            {
+                _pageZoom[page] = Mathf.Clamp(_pageZoom[page], MinZoom, MaxZoom);
+                _pagePan[page] = ClampPagePan(page, _pagePan[page], _pageZoom[page]);
+            }
+            else
+            {
+                _pageZoom[page] = 0.72f;
 
-            // Match the old prototype/vanilla-ish initial framing without requiring
-            // ScrollRect normalized-position calculations.
-            _pagePan[page] = new Vector2(-overflowX * 0.35f, overflowY * 0.50f);
+                float viewportW = _viewport != null ? _viewport.rect.width : 0f;
+                float viewportH = _viewport != null ? _viewport.rect.height : 0f;
+                float scaledW = _pageGraphSize[page].x * _pageZoom[page];
+                float scaledH = _pageGraphSize[page].y * _pageZoom[page];
+
+                float overflowX = Mathf.Max(0f, scaledW - viewportW);
+                float overflowY = Mathf.Max(0f, scaledH - viewportH);
+
+                // Match the old prototype/vanilla-ish initial framing without requiring
+                // ScrollRect normalized-position calculations.
+                _pagePan[page] = new Vector2(-overflowX * 0.35f, overflowY * 0.50f);
+            }
 
             if (page == _builtPage)
             {
@@ -2400,8 +3592,14 @@ namespace DSPTechTreeUX
             float labelCompensation = targetLabelScreenScale / Mathf.Max(0.0001f, zoom);
             foreach (NodeView node in _pageNodes[page].Values)
             {
-                if (node != null && node.LevelBadge != null)
-                    node.LevelBadge.transform.localScale = new Vector3(labelCompensation, labelCompensation, 1f);
+                if (node == null)
+                    continue;
+
+                Vector3 labelScale =
+                    new Vector3(labelCompensation, labelCompensation, 1f);
+
+                if (node.LevelBadge != null)
+                    node.LevelBadge.transform.localScale = labelScale;
             }
 
             if (page == _builtPage)
@@ -2419,7 +3617,7 @@ namespace DSPTechTreeUX
             float viewportW = _viewport.rect.width;
             float viewportH = _viewport.rect.height;
 
-            bool filtered = _matrixFilter >= 0 || _combatFilter != 0;
+            bool filtered = _matrixFilter >= 0 || _combatFilter != 0 || (_builtPage == 1 && _infiniteOnly);
             if (filtered && page >= 0 && page < 2 && _pageVisibleBoundsValid[page])
             {
                 Vector4 bounds = _pageVisibleBounds[page];
@@ -2693,8 +3891,39 @@ namespace DSPTechTreeUX
                 " Hashes";
         }
 
+        private void SetDetailPanelExpanded(bool expanded)
+        {
+            if (_detailPanel == null)
+                return;
+
+            _detailPanel.sizeDelta = expanded
+                ? new Vector2(DetailWidth, DetailHeight)
+                : new Vector2(DetailCollapsedWidth, DetailCollapsedHeight);
+
+            for (int i = 0; i < _detailPanel.childCount; i++)
+            {
+                Transform child = _detailPanel.GetChild(i);
+                if (child == null)
+                    continue;
+
+                bool isPrompt = child.gameObject == (_detailEmptyPrompt != null
+                    ? _detailEmptyPrompt.gameObject
+                    : null);
+
+                child.gameObject.SetActive(isPrompt ? !expanded : expanded);
+            }
+
+            // The live research block is conditionally visible even when the full
+            // details panel is expanded, so restore its actual state after the
+            // generic child visibility pass.
+            if (expanded)
+                RefreshDetailProgress();
+        }
+
         private void PopulateDetails(int techId)
         {
+            SetDetailPanelExpanded(true);
+
             TechProto proto = LDB.techs.Select(techId);
             if (proto == null)
             {
@@ -2835,7 +4064,7 @@ namespace DSPTechTreeUX
                     if (item == null)
                         continue;
 
-                    long count = hashNeeded * (long)proto.ItemPoints[i] / 3600L;
+                    long count = hashNeeded * (long)proto.ItemPoints[i] / TechProto.kPointPerItem;
                     CreateDetailItemIcon(_researchCostRow, item, count, x, true);
                     x += 56f;
                 }
@@ -2923,13 +4152,15 @@ namespace DSPTechTreeUX
 
         private static string FormatHashCount(long value)
         {
-            if (value >= 1000000000L)
-                return (value / 1000000000d).ToString("0.0") + "G";
-            if (value >= 1000000L)
-                return (value / 1000000d).ToString("0.0") + "M";
-            if (value >= 1000L)
-                return (value / 1000d).ToString("0.0") + "k";
-            return value.ToString();
+            StringBuilder sb = new StringBuilder("         ", 12);
+            StringBuilderUtility.WriteKMG(
+                sb,
+                8,
+                value,
+                false,
+                '\u2009',
+                ' ');
+            return sb.ToString().TrimStart();
         }
 
         private void AppendPrerequisiteSection(StringBuilder sb, string heading, int[] ids, bool implicitPrereq)
@@ -2963,7 +4194,7 @@ namespace DSPTechTreeUX
                 _detailIcon.color = new Color(1f, 1f, 1f, 0f);
             }
             if (_detailTitle != null)
-                _detailTitle.text = "Select a technology";
+                _detailTitle.text = "";
             if (_detailLevel != null)
                 _detailLevel.text = "";
             if (_detailStatus != null)
@@ -2978,10 +4209,10 @@ namespace DSPTechTreeUX
             if (_researchCostHeading != null)
                 _researchCostHeading.gameObject.SetActive(false);
             if (_detailBody != null)
-            {
-                _detailBody.text = "Click any node to inspect it.\n\nThe selected technology and every recursive prerequisite are highlighted. Both normal and implicit prerequisites are included.";
-            }
+                _detailBody.text = "";
+
             RefreshResearchButton();
+            SetDetailPanelExpanded(false);
         }
 
         private int GetDirectMatrixMask(TechProto proto)
@@ -3006,28 +4237,27 @@ namespace DSPTechTreeUX
 
         private int GetEffectiveMatrixTier(int techId, HashSet<int> visited)
         {
-            if (!visited.Add(techId))
-                return -1;
-
             TechProto proto = LDB.techs.Select(techId);
-            if (proto == null)
+            if (proto == null || proto.unlockNeedItemArray == null)
                 return -1;
 
-            int tier = HighestBit(GetDirectMatrixMask(proto));
-            tier = Mathf.Max(tier, HighestParentTier(proto.PreTechs, visited));
-            tier = Mathf.Max(tier, HighestParentTier(proto.PreTechsImplicit, visited));
+            int tier = -1;
+
+            for (int i = 0; i < proto.unlockNeedItemArray.Length; i++)
+            {
+                int itemId = proto.unlockNeedItemArray[i].id;
+
+                for (int m = 0; m < MatrixIds.Length; m++)
+                {
+                    if (itemId == MatrixIds[m])
+                    {
+                        tier = Mathf.Max(tier, m);
+                        break;
+                    }
+                }
+            }
+
             return tier;
-        }
-
-        private int HighestParentTier(int[] ids, HashSet<int> visited)
-        {
-            int result = -1;
-            if (ids == null)
-                return result;
-
-            for (int i = 0; i < ids.Length; i++)
-                result = Mathf.Max(result, GetEffectiveMatrixTier(ids[i], visited));
-            return result;
         }
 
         private string MatrixName(int tier)
@@ -3110,20 +4340,10 @@ namespace DSPTechTreeUX
 
         private void OnResearchButtonClick()
         {
-            if (_selectedTechId == 0 || GameMain.history == null)
+            if (_selectedTechId == 0)
                 return;
 
-            // Do not let vanilla's looser queueability rules bypass our inferred
-            // dependency map.
-            if (!IsTechReadyByMap(_selectedTechId))
-                return;
-
-            if (!GameMain.history.CanEnqueueTech(_selectedTechId))
-                return;
-
-            GameMain.history.EnqueueTech(_selectedTechId);
-            RefreshNodeStates();
-            PopulateDetails(_selectedTechId);
+            QueueTechFromNode(_selectedTechId);
         }
 
         private void RefreshResearchButton()
@@ -3272,6 +4492,13 @@ namespace DSPTechTreeUX
             internal UnityEngine.CanvasGroup CanvasGroup;
             internal int DirectMatrixMask;
             internal UnityEngine.UI.Image[] Pips;
+            internal GameObject ResearchWing;
+            internal RectTransform ResearchWingRect;
+            internal UnityEngine.UI.Button ResearchWingButton;
+            internal TechTreeResearchWingGraphic ResearchWingGraphic;
+            internal UnityEngine.CanvasGroup ResearchWingCanvas;
+            internal bool ResearchWingOpen;
+            internal bool Hovered;
         }
 
         private sealed class EdgeView
