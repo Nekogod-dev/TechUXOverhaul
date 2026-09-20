@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Added extra horizontal pan allowance so technologies positioned far to the right by other mods can be moved fully clear of the details panel.
+- Restored the vanilla sandbox-mode **Unlock instantly** action in the replacement technology details panel.
+- Restored the vanilla **Unlock with metadata** action in the replacement technology details panel.
+- Sandbox and metadata unlock actions use Dyson Sphere Program's existing vanilla handlers rather than reimplementing their behaviour.
+- Improved compatibility with mods that add technologies outside the bounds of the vanilla tech tree.
+
 ## 1.0.0
 
 First stable release.
