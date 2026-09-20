@@ -1,10 +1,9 @@
 {
-  "name": "DSPTechTreeUXOverhaul",
+  "name": "TechTreeOverhaul",
   "version_number": "1.0.0",
-  "website_url": "https://github.com/Nekogod-dev/TechUXOverhaul",
-  "description": "A compact, searchable replacement for DSP's Technology and Upgrades screens with clearer research state, filters, dependency highlighting and per-save view persistence.",
+  "website_url": "",
+  "description": "TODO",
   "dependencies": [
-    "xiaoye97-BepInEx-5.4.17",
-    "CommonAPI-DSPModSave-1.2.2"
+    "xiaoye97-BepInEx-5.4.17"
   ]
 }
